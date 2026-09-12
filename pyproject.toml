@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "small-q-attention"
+version = "0.1.0"
+description = "Reference and benchmark harness for specialized small-q paged attention"
+requires-python = ">=3.8"
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+cuda = ["torch>=2.1"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

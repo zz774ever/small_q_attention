@@ -1,0 +1,22 @@
+{
+  "baseline": {
+    "q_len": [2, 4, 8],
+    "kv_len": [1024, 8192, 32768],
+    "batch_size": [1, 4, 16],
+    "dtype": "float16",
+    "head_dim": 128,
+    "page_size": 16,
+    "num_query_heads": 32,
+    "num_kv_heads": 8
+  },
+  "variants": [
+    {"id": "M0", "description": "one block per query head; V0 redundant-score baseline", "status": "complete"},
+    {"id": "M0-score", "description": "one warp cooperatively computes each Q.K score; V1", "status": "complete", "result": "5.00x-9.56x local p50 speedup at KV=1024, batch=1"},
+    {"id": "M1", "description": "one block per query group"},
+    {"id": "M2", "description": "one block per query row and query group"},
+    {"id": "T1", "description": "KV tile size 16 versus 32"},
+    {"id": "T2", "description": "shared-memory KV staging"},
+    {"id": "R1", "description": "register-resident Q fragments"},
+    {"id": "S1", "description": "split-KV reduction"}
+  ]
+}

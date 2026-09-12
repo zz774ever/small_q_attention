@@ -1,0 +1,11 @@
+{
+  "q_len": [2, 4, 8, 16],
+  "kv_len": [1024, 8192, 32768],
+  "batch_size": [1, 4, 16],
+  "dtype": "float16",
+  "head_dim": 128,
+  "page_size": 16,
+  "num_query_heads": 32,
+  "num_kv_heads": 8,
+  "kernel_v0_q_len": [2, 4, 8]
+}
