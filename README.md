@@ -53,6 +53,52 @@ csrc/                           CUDA kernel implementation (added after baseline
 
 V0/V1 的逐阶段假设、数据和决策见 [`docs/stage_comparison.md`](docs/stage_comparison.md)。
 
+服务器侧（NVIDIA H20，SM90）的三份报告：
+
+- [`docs/h20_baseline_report.md`](docs/h20_baseline_report.md) — FlashInfer prefill / XQA / trtllm-gen 的 36 用例基线，即 issue #3420 与 PR #3859 的 before/after。
+- [`docs/h20_v2_report.md`](docs/h20_v2_report.md) — V2（split-KV + warp 分块）与差距归因。
+- [`docs/h20_v3_report.md`](docs/h20_v3_report.md) — V3（GQA K/V 复用），在 `q_len=2, KV=8192` 上与 XQA 打平。
+
+## 服务器复现（H20）
+
+服务器上的 FlashInfer 是源码 checkout（`third_party/flashinfer` @ `a69ad808`）并对内核做 JIT 编译，所以有两件事必须先做，否则会分别遇到 `FileNotFoundError: 'ninja'` 和 `cutlass/arch/reg_reconfig.h: No such file`：
+
+```bash
+# 1) 激活 conda 环境：非登录 shell 不会自动激活，ninja 在 env 的 bin 目录里
+source /usr/local/miniconda3/bin/activate py312
+
+# 2) 初始化 FlashInfer 需要的子模块：XQA 路径不需要 CUTLASS，prefill 路径需要
+git -C third_party/flashinfer submodule update --init --recursive \
+  3rdparty/cutlass 3rdparty/cccl 3rdparty/spdlog
+```
+
+然后：
+
+```bash
+# 自研 kernel 正确性
+python scripts/build_and_test_v1.py
+python scripts/build_and_test_v2.py   # 覆盖多 chunk 的 merge 路径
+python scripts/build_and_test_v3.py   # 覆盖自动测长与显式 max_seq_len 两条路径
+
+# FlashInfer baseline（36 用例 x 3 后端）
+python scripts/run_flashinfer_baseline.py --backends prefill xqa trtllm \
+  --q-lens 2 4 8 16 --kv-lens 1024 8192 32768 --batch-sizes 1 4 16 \
+  --output results/h20_flashinfer_matrix36.jsonl
+
+# 自研 kernel 与 FlashInfer 的配对表
+python scripts/run_gpu_matrix.py --variants v0 v1 v2 v3 \
+  --q-lens 2 4 8 --kv-lens 1024 8192 --batch-sizes 1 4 \
+  --output results/h20_v0_v1_v2_v3.jsonl
+python scripts/compare_backends.py results/h20_v0_v1_v2_v3.jsonl \
+  results/h20_flashinfer_matrix36.jsonl
+```
+
+三个坑记在这里：
+
+- `run_flashinfer_baseline.py` 在 `q_len > 1` 时必须构造 spec-dec draft mask（脚本内部按上游测试的 `generate_spec_dec_mask` 实现），否则 XQA / trtllm-gen 会抛 `AssertionError: Mask is required for speculative decoding`。
+- 本机 `ncu` 被驱动权限挡住（`ERR_NVGPUCTRPERM`），需要 kernel 级时间分解时用 `scripts/profile_v1_v2.py --torch-profiler`。
+- 计时统一用 CUDA events；`run_gpu_matrix.py` 会在估算显存超过当前空闲的 70% 时跳过用例并记录 `skipped`，不要把跳过当成通过。
+
 ## Local checks
 
 The current Windows host can run the dependency-light checks:
