@@ -9,6 +9,18 @@
 
 ## 环境与固定版本
 
+> **更正说明（2026-09-13 追加）**
+>
+> 本报告下表里的 `flashinfer_prefill` 列**不是生产代码实际走的路径**，因此"XQA 比 prefill 快 1.12–10.51x"这个结论**被高估了**。
+>
+> 原因：该列用的是 `BatchPrefillWithPagedKVCacheWrapper` 的默认 plan 配置。而生产代码里 MTP 请求走的是 `BatchDecodeWithPagedKVCacheWrapper`，它虽然最终也派发到 `BatchPrefillWithPagedKVCacheKernel`，但用的是 **split-KV + `PersistentVariableLengthMergeStatesKernel` 合并**的 plan，实测比本报告这一列快约 9 倍。
+>
+> 补充：本 revision 的 `BatchPrefillWithPagedKVCacheWrapper` 已经不接受 `use_tensor_cores` 参数（构造直接报 `TypeError`），所以两列的性能差**不能**归因于 tensor core 开关，而是 plan 配置差异。
+>
+> 严格对照（生产路径 vs PR #3859 提议的 XQA 路由，同一形状同一布局，3 轮 × 15 次取中位数）见 `results/h20_path_comparison.jsonl` 与 `docs/pr3859_comment_draft.md`。结论是：**XQA 在 12 个 shape 里有 9 个更慢，中位数慢 8%**，只在 `q_len=8` 大 batch/长 KV 时快 10–41%；issue 声称的 10× 差距在 H20 上无法复现。
+>
+> 本报告其余部分（正确性、kernel 名、环境事实）不受影响。
+
 | 项目 | 值 |
 |---|---|
 | GPU | NVIDIA H20，compute capability 9.0，97871 MiB |
