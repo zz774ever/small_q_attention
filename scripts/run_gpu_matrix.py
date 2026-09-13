@@ -16,7 +16,13 @@ ROOT = Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from small_q_attention import paged_mtp_attention_reference  # noqa: E402
-from small_q_attention.cuda import forward_v0, forward_v1, forward_v2, forward_v3  # noqa: E402
+from small_q_attention.cuda import (  # noqa: E402
+    forward_v0,
+    forward_v1,
+    forward_v2,
+    forward_v3,
+    forward_v4,
+)
 
 
 def _percentile(values, fraction):
@@ -67,7 +73,11 @@ def _resolve_forward(variant, case, chunk_keys):
         return lambda *call_args, **kwargs: forward_v2(
             *call_args, chunk_keys=chunk_keys, **kwargs
         )
-    return lambda *call_args, **kwargs: forward_v3(
+    if variant == "v3":
+        return lambda *call_args, **kwargs: forward_v3(
+            *call_args, chunk_keys=chunk_keys, max_seq_len=case["kv_len"], **kwargs
+        )
+    return lambda *call_args, **kwargs: forward_v4(
         *call_args, chunk_keys=chunk_keys, max_seq_len=case["kv_len"], **kwargs
     )
 
@@ -77,7 +87,7 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--variants", nargs="+", choices=("v0", "v1", "v2", "v3"), default=["v0", "v1"]
+        "--variants", nargs="+", choices=("v0", "v1", "v2", "v3", "v4"), default=["v0", "v1"]
     )
     parser.add_argument(
         "--chunk-keys", type=int, default=512, help="v2 only: KV entries owned by one block"

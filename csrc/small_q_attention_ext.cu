@@ -556,6 +556,194 @@ __global__ void small_q_attention_v3_partial_kernel(
   }
 }
 
+// V4 keeps V3's mapping (one block per query-row-group, kv head and KV chunk,
+// with each K/V slice reused by every query head of that kv head) and changes
+// only how the per-lane slices are laid out and loaded.
+//
+// In V3 a lane owns head_dim slots {lane, lane+32, lane+64, lane+96}, so each
+// key costs four separate two-byte loads for K and four for V, and a warp
+// touches 128 halves spread over the full 256-byte row. V4 gives each lane four
+// consecutive dims instead, so K and V each load as two 4-byte halves-pairs
+// (an 8-byte contiguous access per lane) and a warp covers the row in one
+// contiguous sweep. The arithmetic, the softmax and the merge are unchanged.
+
+__device__ inline void v4_load4(const half* __restrict__ base, float out[4]) {
+  const __half2 lo = *reinterpret_cast<const __half2*>(base);
+  const __half2 hi = *reinterpret_cast<const __half2*>(base + 2);
+  out[0] = __half2float(__low2half(lo));
+  out[1] = __half2float(__high2half(lo));
+  out[2] = __half2float(__low2half(hi));
+  out[3] = __half2float(__high2half(hi));
+}
+
+__global__ void small_q_attention_v4_partial_kernel(
+    const half* __restrict__ query,
+    const half* __restrict__ key_cache,
+    const half* __restrict__ value_cache,
+    const int32_t* __restrict__ block_tables,
+    const int32_t* __restrict__ seq_lens,
+    float* __restrict__ partial_acc,
+    float* __restrict__ partial_stats,
+    int batch,
+    int q_len,
+    int num_query_heads,
+    int num_kv_heads,
+    int head_dim,
+    int page_size,
+    int max_pages,
+    int chunk_keys,
+    int num_chunks) {
+  const int logical = blockIdx.x;
+  const int chunk = blockIdx.y;
+  const int kvh = logical % num_kv_heads;
+  const int q_index = logical / num_kv_heads;
+  const int qi = q_index % q_len;
+  const int b = q_index / q_len;
+  if (b >= batch) return;
+
+  const int tid = threadIdx.x;
+  const int lane = tid & 31;
+  const int warp = tid >> 5;
+  const int d0 = lane * 4;
+
+  const int group_size = num_query_heads / num_kv_heads;
+  if (group_size != V3_GROUP) return;
+
+  const int total_len = seq_lens[b];
+  const int valid_len = total_len - q_len + qi + 1;
+  const int chunk_start = chunk * chunk_keys;
+  const int row_base = (b * q_len + qi) * num_query_heads + kvh * group_size;
+
+  if (valid_len <= 0 || chunk_start >= valid_len) {
+    for (int h = 0; h < V3_GROUP; ++h) {
+      const int acc_base = ((row_base + h) * num_chunks + chunk) * head_dim;
+#pragma unroll
+      for (int j = 0; j < 4; ++j) {
+        partial_acc[acc_base + d0 + j] = 0.0f;
+      }
+      if (tid == 0) {
+        const int stat = ((row_base + h) * num_chunks + chunk) * 2;
+        partial_stats[stat + 0] = -INFINITY;
+        partial_stats[stat + 1] = 0.0f;
+      }
+    }
+    return;
+  }
+
+  const int chunk_end = min(chunk_start + chunk_keys, valid_len);
+  const float scale = rsqrtf(static_cast<float>(head_dim));
+
+  float q_reg[V3_GROUP][4];
+#pragma unroll
+  for (int h = 0; h < V3_GROUP; ++h) {
+    v4_load4(query + (row_base + h) * head_dim + d0, q_reg[h]);
+  }
+
+  float running_max[V3_GROUP];
+  float running_denom[V3_GROUP];
+  float acc[V3_GROUP][4];
+#pragma unroll
+  for (int h = 0; h < V3_GROUP; ++h) {
+    running_max[h] = -INFINITY;
+    running_denom[h] = 0.0f;
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+      acc[h][j] = 0.0f;
+    }
+  }
+
+  for (int key = chunk_start + warp; key < chunk_end; key += V3_WARPS) {
+    const int page_slot = key / page_size;
+    const int page_offset = key % page_size;
+    const int physical_page = block_tables[b * max_pages + page_slot];
+    const int kv_base = ((physical_page * page_size + page_offset) * num_kv_heads + kvh) * head_dim;
+
+    float k_reg[4];
+    float v_reg[4];
+    v4_load4(key_cache + kv_base + d0, k_reg);
+    v4_load4(value_cache + kv_base + d0, v_reg);
+
+    float partial[V3_GROUP];
+#pragma unroll
+    for (int h = 0; h < V3_GROUP; ++h) {
+      float dot = 0.0f;
+#pragma unroll
+      for (int j = 0; j < 4; ++j) {
+        dot += q_reg[h][j] * k_reg[j];
+      }
+      partial[h] = dot;
+    }
+#pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+#pragma unroll
+      for (int h = 0; h < V3_GROUP; ++h) {
+        partial[h] += __shfl_down_sync(0xffffffffu, partial[h], offset);
+      }
+    }
+
+#pragma unroll
+    for (int h = 0; h < V3_GROUP; ++h) {
+      const float score = __shfl_sync(0xffffffffu, partial[h], 0) * scale;
+      const float new_max = fmaxf(running_max[h], score);
+      const float rescale = __expf(running_max[h] - new_max);
+      const float weight = __expf(score - new_max);
+      running_denom[h] = running_denom[h] * rescale + weight;
+#pragma unroll
+      for (int j = 0; j < 4; ++j) {
+        acc[h][j] = acc[h][j] * rescale + weight * v_reg[j];
+      }
+      running_max[h] = new_max;
+    }
+  }
+
+  __shared__ float warp_acc[V3_WARPS][V3_GROUP][128];
+  __shared__ float warp_max[V3_WARPS][V3_GROUP];
+  __shared__ float warp_denom[V3_WARPS][V3_GROUP];
+#pragma unroll
+  for (int h = 0; h < V3_GROUP; ++h) {
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+      warp_acc[warp][h][d0 + j] = acc[h][j];
+    }
+    if (lane == 0) {
+      warp_max[warp][h] = running_max[h];
+      warp_denom[warp][h] = running_denom[h];
+    }
+  }
+  __syncthreads();
+
+#pragma unroll
+  for (int h = 0; h < V3_GROUP; ++h) {
+    float chunk_max = -INFINITY;
+#pragma unroll
+    for (int w = 0; w < V3_WARPS; ++w) {
+      chunk_max = fmaxf(chunk_max, warp_max[w][h]);
+    }
+    float warp_scale[V3_WARPS];
+    float chunk_denom = 0.0f;
+#pragma unroll
+    for (int w = 0; w < V3_WARPS; ++w) {
+      warp_scale[w] = warp_denom[w][h] > 0.0f ? __expf(warp_max[w][h] - chunk_max) : 0.0f;
+      chunk_denom += warp_denom[w][h] * warp_scale[w];
+    }
+    const int acc_base = ((row_base + h) * num_chunks + chunk) * head_dim;
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+      float merged = 0.0f;
+#pragma unroll
+      for (int w = 0; w < V3_WARPS; ++w) {
+        merged += warp_acc[w][h][d0 + j] * warp_scale[w];
+      }
+      partial_acc[acc_base + d0 + j] = merged;
+    }
+    if (tid == 0) {
+      const int stat = ((row_base + h) * num_chunks + chunk) * 2;
+      partial_stats[stat + 0] = chunk_max;
+      partial_stats[stat + 1] = chunk_denom;
+    }
+  }
+}
+
 }  // namespace
 
 torch::Tensor small_q_attention_v0(
@@ -801,10 +989,90 @@ torch::Tensor small_q_attention_v3(
   return output;
 }
 
+torch::Tensor small_q_attention_v4(
+    torch::Tensor query,
+    torch::Tensor key_cache,
+    torch::Tensor value_cache,
+    torch::Tensor block_tables,
+    torch::Tensor seq_lens,
+    int64_t page_size,
+    int64_t chunk_keys,
+    int64_t max_seq_len) {
+  TORCH_CHECK(query.is_cuda() && key_cache.is_cuda() && value_cache.is_cuda(), "inputs must be CUDA");
+  TORCH_CHECK(block_tables.is_cuda() && seq_lens.is_cuda(), "metadata must be CUDA");
+  TORCH_CHECK(query.scalar_type() == torch::kFloat16 && key_cache.scalar_type() == torch::kFloat16 &&
+                  value_cache.scalar_type() == torch::kFloat16,
+              "v4 supports FP16 only");
+  TORCH_CHECK(query.dim() == 4 && key_cache.dim() == 4, "invalid input rank");
+  TORCH_CHECK(value_cache.sizes() == key_cache.sizes(), "value_cache shape mismatch");
+  TORCH_CHECK(query.is_contiguous() && key_cache.is_contiguous() && value_cache.is_contiguous() &&
+                  block_tables.is_contiguous() && seq_lens.is_contiguous(),
+              "inputs must be contiguous");
+
+  const int batch = query.size(0);
+  const int q_len = query.size(1);
+  const int num_query_heads = query.size(2);
+  const int head_dim = query.size(3);
+  const int num_pages = key_cache.size(0);
+  const int cache_page_size = key_cache.size(1);
+  const int num_kv_heads = key_cache.size(2);
+  const int max_pages = block_tables.size(1);
+
+  TORCH_CHECK(q_len == 2 || q_len == 4 || q_len == 8, "v4 supports q_len 2, 4, or 8");
+  TORCH_CHECK(head_dim == 128, "v4 requires head_dim 128");
+  TORCH_CHECK(num_query_heads % num_kv_heads == 0 && num_query_heads / num_kv_heads == 4,
+              "v4 requires a GQA group size of exactly 4 (Hq/Hkv = 32/8)");
+  TORCH_CHECK(page_size == cache_page_size && seq_lens.numel() == batch &&
+                  block_tables.size(0) == batch,
+              "invalid v4 metadata");
+  TORCH_CHECK(num_pages > 0 && max_pages > 0, "empty KV cache is not supported");
+  TORCH_CHECK(chunk_keys > 0, "chunk_keys must be positive");
+
+  int longest = static_cast<int>(max_seq_len);
+  if (longest <= 0) {
+    longest = static_cast<int>(seq_lens.max().item<int32_t>());
+  }
+  TORCH_CHECK(longest > 0, "seq_lens must be positive");
+  const int num_chunks = (longest + static_cast<int>(chunk_keys) - 1) / static_cast<int>(chunk_keys);
+  const int rows = batch * q_len * num_query_heads;
+  const int kv_rows = batch * q_len * num_kv_heads;
+
+  auto float_opts = torch::TensorOptions().device(query.device()).dtype(torch::kFloat32);
+  auto partial_acc = torch::empty({rows, num_chunks, head_dim}, float_opts);
+  auto partial_stats = torch::empty({rows, num_chunks, 2}, float_opts);
+  auto output = torch::empty_like(query);
+
+  small_q_attention_v4_partial_kernel<<<dim3(kv_rows, num_chunks), dim3(V3_THREADS)>>>(
+      reinterpret_cast<const half*>(query.data_ptr<at::Half>()),
+      reinterpret_cast<const half*>(key_cache.data_ptr<at::Half>()),
+      reinterpret_cast<const half*>(value_cache.data_ptr<at::Half>()),
+      block_tables.data_ptr<int32_t>(),
+      seq_lens.data_ptr<int32_t>(),
+      partial_acc.data_ptr<float>(),
+      partial_stats.data_ptr<float>(),
+      batch, q_len, num_query_heads, num_kv_heads, head_dim,
+      static_cast<int>(page_size), max_pages, static_cast<int>(chunk_keys), num_chunks);
+  cudaError_t launch_error = cudaGetLastError();
+  TORCH_CHECK(launch_error == cudaSuccess, "small_q_attention_v4 partial launch failed: ",
+              cudaGetErrorString(launch_error));
+
+  small_q_attention_v2_merge_kernel<<<dim3(rows), dim3(head_dim)>>>(
+      partial_acc.data_ptr<float>(),
+      partial_stats.data_ptr<float>(),
+      reinterpret_cast<half*>(output.data_ptr<at::Half>()),
+      num_chunks, head_dim);
+  launch_error = cudaGetLastError();
+  TORCH_CHECK(launch_error == cudaSuccess, "small_q_attention_v4 merge launch failed: ",
+              cudaGetErrorString(launch_error));
+  return output;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("forward", &small_q_attention_v0, "Small-Q paged attention v0 (CUDA)");
   m.def("forward_v1", &small_q_attention_v1, "Small-Q paged attention v1 (CUDA)");
   m.def("forward_v2", &small_q_attention_v2, "Small-Q paged attention v2: split-KV, warp-tiled, CUDA");
   m.def("forward_v3", &small_q_attention_v3,
         "Small-Q paged attention v3: split-KV plus GQA-shared K/V, CUDA");
+  m.def("forward_v4", &small_q_attention_v4,
+        "Small-Q paged attention v4: v3 plus vectorised per-lane K/V loads, CUDA");
 }

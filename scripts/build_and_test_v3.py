@@ -14,7 +14,7 @@ ROOT = Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from small_q_attention import paged_mtp_attention_reference  # noqa: E402
-from small_q_attention.cuda import forward_v1, forward_v2, forward_v3  # noqa: E402
+from small_q_attention.cuda import forward_v1, forward_v2, forward_v3, forward_v4  # noqa: E402
 
 
 def run_case(torch, device, q_len, kv_len, chunks=(128, 512), page_size=16, hq=32, hkv=8, dim=128, batch=1):
@@ -59,6 +59,12 @@ def run_case(torch, device, q_len, kv_len, chunks=(128, 512), page_size=16, hq=3
         errors[f"v3_chunk{chunk_keys}_autolen"] = (
             (output_measured.float() - reference.float()).abs().max().item()
         )
+        output_v4 = forward_v4(
+            query, key_cache, value_cache, block_tables, seq_lens, page_size, chunk_keys, kv_len
+        )
+        torch.cuda.synchronize()
+        errors[f"v4_chunk{chunk_keys}"] = (output_v4.float() - reference.float()).abs().max().item()
+        errors[f"v4_chunk{chunk_keys}_vs_v3"] = (output_v4.float() - output.float()).abs().max().item()
     return errors
 
 

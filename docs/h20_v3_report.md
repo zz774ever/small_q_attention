@@ -93,3 +93,28 @@ python scripts/sweep_v2_chunk.py --variant v3 --q-lens 2 8 --kv-lens 8192 \
 python scripts/compare_backends.py results/h20_v0_v1_v2_v3.jsonl \
   results/h20_flashinfer_matrix36.jsonl
 ```
+
+## 附：V4（向量化加载）的负结果
+
+V3 里每个 lane 拥有的维度是 `{lane, lane+32, lane+64, lane+96}`，所以每个 key 要做 4 次跨步的 2 字节加载。V4 把 lane 的维度改成连续 4 个 `[4*lane, 4*lane+4)`，K 和 V 各用两次 4 字节的 `__half2` 加载（每 lane 一次 8 字节连续访问），其余算法完全不变，用来验证"访存效率是不是瓶颈"。
+
+正确性：与 V3 完全一致（`q_len` 2/4/8 × KV 33/1024/8192，chunk 128/512，最大绝对误差 ≤ 4.88e-4，V4 与 V3 互差 ≤ 1.5e-4）。
+
+性能（27 用例矩阵，chunk=512）：
+
+| 统计 | v4/v3 p50 比值 |
+|---|---|
+| 最小 / 平均 / 最大 | 0.95x / 0.98x / 1.01x |
+
+**结论：只有约 2% 的提升，访存效率不是瓶颈。** V4 与 V2 的归因实验合在一起，把 V3 的瓶颈定位到了每 key 的依赖链上——每个 key 每个 lane 需要 4 次 warp 归约（20 次 shuffle）加 8 次 `__expf`，而且这些操作在 key 之间是串行的。要再往上走只能减少"每个 query 向量摊到的每 key 工作量"，标准做法是上张量化（`mma`）把归约放进硬件；那是明显更大的改造，且收益仍不确定。
+
+因此 kernel 线仍然冻结在 V3，V4 作为"排除访存假设"的实验保留在仓库里。
+
+复现：
+
+```bash
+python scripts/build_and_test_v3.py    # 同时校验 V3 与 V4
+python scripts/run_gpu_matrix.py --variants v3 v4 \
+  --q-lens 2 4 8 --kv-lens 1024 8192 32768 --batch-sizes 1 4 16 \
+  --chunk-keys 512 --output results/h20_v3_v4.jsonl
+```

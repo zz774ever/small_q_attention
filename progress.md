@@ -290,3 +290,13 @@
 | V3 auto length path | same cases with `max_seq_len=0` | match explicit path | identical errors | PASS |
 | Paired benchmark | 12 cases x v0/v1/v2/v3 | no failures | 48 ok rows | PASS |
 | V3 chunk sweep | 4 shapes x 5 chunk sizes | best near chunk 256 | 82.7-836.9 us, optimum flat 256-512 | PASS |
+
+## Session: 2026-09-13 (V4: vectorised loads, negative result)
+
+### Phase 4 follow-up: ruling out the memory-access hypothesis
+- Hypothesis: V3 loads K and V with four strided two-byte accesses per lane, so giving each lane four consecutive dims and using 8-byte vector loads should improve throughput.
+- Implementation: `small_q_attention_v4_partial_kernel` keeps V3's mapping and arithmetic and only changes the per-lane dim layout (`[4*lane, 4*lane+4)`) plus `__half2` loads; `forward_v4` mirrors `forward_v3`; `scripts/build_and_test_v3.py` now checks both kernels.
+- Result: correctness identical to V3 (max abs error <= `4.88e-4`, V4 vs V3 <= `1.5e-4`). Performance over the 27-case matrix at chunk 512 is `0.95x`-`1.01x`, mean `0.98x` of V3.
+- Interpretation: access efficiency is not the bottleneck. Combined with the V2 result, the residual cost sits in the per-key dependency chain (20 shuffles plus 8 `expf` per key per lane, serialised across keys). Closing the remaining gap would need tensor-core reductions, a much larger change with uncertain payoff.
+- Decision: kernel line stays frozen at V3; V4 is kept as the experiment that ruled out the memory-access hypothesis.
+- Files: `csrc/small_q_attention_ext.cu`, `src/small_q_attention/cuda.py`, `scripts/run_gpu_matrix.py`, `scripts/build_and_test_v3.py`, `results/h20_v3_v4.jsonl`, `docs/h20_v3_report.md`
