@@ -19,6 +19,24 @@ comparison, but it does not establish superiority over FlashInfer XQA,
 FlashAttention, or a Hopper tensor-core path. Those comparisons require the
 server matrix and architecture-specific profiling.
 
+## Server baseline (H20)
+
+The H20 comparison is now measured (`docs/h20_baseline_report.md`). It changes
+the stage ledger in one important way: V1's local win over V0 is real, but it
+says nothing about competitiveness against the production path.
+
+| Stage | FlashInfer prefill | FlashInfer XQA | p50 speedup of XQA | V1 vs XQA |
+|---|---|---|---|---|
+| `q_len=2, KV=1024, batch=1` | 80.8 us | 72.1 us | 1.12x | 19.5x slower |
+| `q_len=4, KV=8192, batch=1` | 344.7 us | 60.6 us | 5.69x | 196.7x slower |
+| `q_len=8, KV=8192, batch=4` | 644.4 us | 122.6 us | 5.26x | 202.6x slower |
+
+Over the full 36-case matrix XQA beats the prefill routing by 1.12x-10.51x,
+so the gap that issue #3420 describes is real and is already addressed by the
+XQA routing in this revision. The standalone prototype is 20-200x behind XQA,
+and the gap grows with KV length, which rules out closing it by tuning the V1
+layout. V2 must change parallelism (mapping) and KV reuse, not just arithmetic.
+
 ## Local matrix subset
 
 The memory-aware runner completed 12 paired cases on the RTX 3050 (q_len

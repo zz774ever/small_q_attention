@@ -10,3 +10,7 @@ profiling/
 *.nsys-rep
 *.ncu-rep
 *.log
+
+# Pinned upstream checkouts are provisioned separately, never vendored.
+# See docs/local_setup.md.
+third_party/

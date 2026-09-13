@@ -1,0 +1,6 @@
+2026-09-12 10:03:14,787 - INFO - core.py:447 - flashinfer.jit: Building JIT module xqa_input_f16_kv_cache_f16_output_f16_page_size_16_head_dim_128_head_group_ratio_4_use_sliding_window_False_use_spec_dec_True_spec_q_seq_len_2; this can take several minutes on first use.
+GPU: NVIDIA H20
+capability: (9, 0)
+shape: (2, 32, 128) KV: 8192
+TRTLLM_GEN: FAIL AssertionError Mask is required for speculative decoding
+XQA: FAIL AssertionError Mask is required for speculative decoding

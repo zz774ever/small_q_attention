@@ -4,7 +4,7 @@
 Build and profile an independent specialized small-q paged-attention kernel for speculative decoding, then validate and optionally integrate the strongest result into FlashInfer.
 
 ## Current Phase
-Phase 4 - V0/V1 local CUDA comparison complete; profiling and broader controlled matrix are next.
+Phase 2 (H20 FlashInfer baseline map) complete, Phase 4 in progress. The prefill to XQA gain from PR #3859 is now measured on H20; the standalone V0/V1 prototype is 20-200x behind XQA, so the next kernel step is a new design (V2: mapping and KV-tile reuse) rather than more V1 tuning. See `docs/h20_baseline_report.md`.
 
 ## Phases
 
@@ -24,12 +24,12 @@ Phase 4 - V0/V1 local CUDA comparison complete; profiling and broader controlled
 - **Status:** complete for local WSL development; Windows Python remains non-CUDA and is not used for measurements.
 
 ### Phase 2: Baseline performance map and Go/No-Go
-- [ ] Run the first 36-case core matrix before writing a complex kernel.
+- [x] Run the first 36-case core matrix before writing a complex kernel.
 - [ ] Compare existing FlashInfer paths, FlashAttention where available, and a simple reference implementation.
-- [ ] Cover `q_len=2/4/8/16`, KV length 1K/8K/32K, batch 1/4/16, FP16, head_dim 128, page_size 16, GQA 32/8.
-- [ ] Record latency, effective bandwidth, and correctness; use Hopper for XQA conclusions when available.
-- [ ] Decide within one week whether a specialized kernel has a measurable target gap.
-- **Status:** pending
+- [x] Cover `q_len=2/4/8/16`, KV length 1K/8K/32K, batch 1/4/16, FP16, head_dim 128, page_size 16, GQA 32/8.
+- [ ] Record latency, effective bandwidth, and correctness; use Hopper for XQA conclusions when available. Latency and correctness are recorded; effective bandwidth is not.
+- [x] Decide within one week whether a specialized kernel has a measurable target gap.
+- **Status:** complete for the prefill/XQA/trtllm comparison on H20 (`results/h20_flashinfer_matrix36.jsonl`, `docs/h20_baseline_report.md`). FlashAttention and effective-bandwidth measurements remain open.
 
 ### Phase 3: Small-Q kernel prototype
 - [x] Implement a standalone FP16 kernel for the fixed first-version contract: paged KV, `q_len=2/4/8`, head_dim 128, page_size 16, GQA 32/8.
@@ -46,7 +46,7 @@ Phase 4 - V0/V1 local CUDA comparison complete; profiling and broader controlled
 - [ ] Compare additional mapping variants and tile sizes with controlled microbenchmarks.
 - [ ] Profile promising variants with Nsight Compute/System: kernel latency, memory transactions, tensor-core/FP unit utilization, warp stall, occupancy, and L2 behavior.
 - [ ] Stop expanding the feature matrix until one variant beats the relevant baseline on a reproducible subset.
-- **Status:** in_progress; V1 shows a strong local signal, but server profiling and broader shapes remain.
+- **Status:** in_progress and re-scoped. V1 beats V0 by 5-11x locally, but the H20 baseline shows V1 is 20-200x slower than FlashInfer XQA, so V1 is not a competitive design. The next variant must change the mapping (M1/M2) and stage KV tiles (T2) instead of tuning V1.
 
 ### Local-only completion checklist
 - [x] Add memory-aware GPU matrix runner with JSONL output.
@@ -77,11 +77,11 @@ Phase 4 - V0/V1 local CUDA comparison complete; profiling and broader controlled
 - A100 results are optional SM80 evidence; XQA conclusions require SM90+ hardware.
 
 ## Key Questions
-1. Which FlashInfer revision contains the current #3859 implementation, and is it merged or still a PR-only branch?
-2. Does the server provide H100/H20 in addition to A100?
-3. For `q_len=4/8`, is XQA correct and faster than the existing tensor-core path across realistic batch/context shapes?
-4. Does the baseline map show a stable gap that a specialized mapping can target?
-5. Which part of the independent kernel is mature enough to upstream: kernel, dispatch, tests, or benchmark?
+1. Which FlashInfer revision contains the current #3859 implementation, and is it merged or still a PR-only branch? — Answered: the pinned `a69ad808` checkout already carries the `q_len_per_req` routing and the spec-dec `mask` plumbing.
+2. Does the server provide H100/H20 in addition to A100? — Answered: the server is an H20 (SM90, 97.8 GB), so XQA conclusions are in scope.
+3. For `q_len=4/8`, is XQA correct and faster than the existing tensor-core path across realistic batch/context shapes? — Answered: yes. XQA is correct within FP16 tolerance and 1.1-10.5x faster than the prefill routing over the 36-case matrix.
+4. Does the baseline map show a stable gap that a specialized mapping can target? — Answered: yes for prefill, which is still 4.7-10.5x behind XQA at KV>=8K; but the current standalone prototype cannot reach either number.
+5. Which part of the independent kernel is mature enough to upstream: kernel, dispatch, tests, or benchmark? — Open. The benchmark harness and protocol are the mature parts; the kernel is not.
 
 ## Decisions Made
 | Decision | Rationale |

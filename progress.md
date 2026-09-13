@@ -178,3 +178,48 @@
 - Completed local paired subset: q_len 2/4/8, KV 1024/8192, batch 1/4/16 where selected. V1 won every completed pair; p50 speedups ranged from `6.37x` to `14.91x`.
 - Added `scripts/summarize_results.py` and copied raw result files to `results_local_batch1.jsonl`, `results_local_batch4.jsonl`, and `results_local_batch16.jsonl` in the Windows project root.
 - Added deterministic zero/high-magnitude reference fixtures and `docs/stage_comparison.md`.
+
+## Session: 2026-09-13 (H20 FlashInfer baseline)
+
+### Phase 2: FlashInfer baseline map on H20
+- **Status:** complete for the prefill / XQA / trtllm-gen comparison
+- Actions taken:
+  - Added `scripts/run_flashinfer_baseline.py`, a protocol-compatible runner for the three FlashInfer paths that issue #3420 and PR #3859 touch, with optional reference checking.
+  - Added `scripts/compare_backends.py` to join kernel results (`p50_us`) and FlashInfer results (`latency_us_p50`) on the same case key.
+  - Found the root cause of the earlier `Mask is required for speculative decoding` failure: XQA and trtllm-gen need the packed draft mask `[batch, q_len, div_up(q_len, 32) * 2]` (uint16) whenever `q_len_per_req > 1`. Adapted `generate_spec_dec_mask` from `tests/attention/test_xqa_batch_decode.py`.
+  - Fixed two environment blockers: `ninja` was missing from the non-login PATH (conda env `py312` must be activated), and the CUTLASS/CCCL/spdlog submodules were uninitialised so the prefill JIT could not compile.
+  - Ran the 12-case paired subset and then the full 36-case matrix.
+  - Re-ran the standalone kernel correctness check on H20 and saved it to `reports/h20/small_q_kernel_correctness.txt`.
+- Results:
+  - All 36 cases and 108 backend calls succeeded, with no failures or skips.
+  - XQA is 1.12x-10.51x faster than the prefill routing; the gain grows with KV length (about 10x at KV=32768/batch=1).
+  - `q_len=16` also benefits (1.7x-6.4x), so the #3859 gate is not limited to the small `q_len` values in the issue.
+  - trtllm-gen is systematically 10-25% slower than XQA on this matrix.
+  - XQA/trtllm-gen match the prefill reference within `2.44e-4` (FP16 level).
+  - The standalone V1 kernel is 20-200x slower than XQA and the gap widens with KV: `q_len=2/KV=1024/batch=1` 1404.7 us vs 72.1 us, `q_len=8/KV=8192/batch=4` 24844.6 us vs 122.6 us.
+  - Standalone kernel correctness on H20: max abs error `1.22e-4` / `2.44e-4` / `4.88e-4` for `q_len=2/4/8`.
+- Files created/modified:
+  - `scripts/run_flashinfer_baseline.py`, `scripts/compare_backends.py`
+  - `results/h20_flashinfer_baseline.jsonl`, `results/h20_flashinfer_matrix36.jsonl`
+  - `docs/h20_baseline_report.md`, `docs/stage_comparison.md`, `task_plan.md`, `progress.md`
+- Interpretation:
+  - The prefill path is still 4.7-10.5x behind XQA at KV>=8K, so a target gap exists;
+  - but V1 cannot capture it. The measured bottleneck is structural: one block per `(batch, query_row, query_head)` leaves only 64 blocks at `batch=1/q_len=2`, the KV loop is fully serial per block, each key costs at least two `__syncthreads()`, and there is no tensor-core or tiled-KV reuse.
+  - Decision: stop tuning V1; the next variant must be V2 with a different mapping (M1/M2) and shared-memory KV staging (T2).
+
+## Test Results
+| Test | Input | Expected | Actual | Status |
+|------|-------|----------|--------|--------|
+| FlashInfer probe | `q_len=2, KV=1024, batch=1` | prefill and XQA both run | prefill 82.0 us, XQA 45.8 us, both correct | PASS |
+| Paired subset | 12 cases x 3 backends | no failures | 36 ok rows | PASS |
+| Full matrix | 36 cases x 3 backends | no failures | 108 ok rows | PASS |
+| XQA correctness | 3 sampled cases vs prefill | FP16-level agreement | max abs error <= 2.44e-4 | PASS |
+| Standalone kernel on H20 | `q_len=2/4/8` | match CPU reference | 1.22e-4 / 2.44e-4 / 4.88e-4 | PASS |
+
+## Error Log
+| Timestamp | Error | Attempt | Resolution |
+|-----------|-------|---------|------------|
+| 2026-09-13 | `FileNotFoundError: 'ninja'` during prefill JIT | 1 | Activate the conda env (`source /usr/local/miniconda3/bin/activate py312`) before running |
+| 2026-09-13 | `cutlass/arch/reg_reconfig.h` / `cute/tensor.hpp` missing | 1 | Initialise the `cutlass`, `cccl`, and `spdlog` submodules |
+| 2026-09-13 | `AssertionError: Mask is required for speculative decoding` | 1 | Pass the packed spec-dec draft mask |
+| 2026-09-13 | Intermittent SSH connection timeouts while the server was busy | 3 | Retried with a longer `ConnectTimeout` |
