@@ -1,0 +1,12 @@
+(anonymous namespace)::small_q_attention_v2_partial_...         0.00%       0.000us         0.00%       0.000us       0.000us       1.282ms        92.04%       1.282ms     128.164us            10  
+(anonymous namespace)::small_q_attention_v2_merge_ke...         0.00%       0.000us         0.00%       0.000us       0.000us      80.796us         5.80%      80.796us       8.080us            10  
+                         Memcpy DtoH (Device -> Pinned)         0.00%       0.000us         0.00%       0.000us       0.000us      15.198us         1.09%      15.198us       1.520us            10  
+void at::native::reduce_kernel<512, 1, at::native::R...         0.00%       0.000us         0.00%       0.000us       0.000us      14.847us         1.07%      14.847us       1.485us            10  
+                                Activity Buffer Request        60.74%       2.050ms        60.74%       2.050ms       2.050ms       0.000us         0.00%       0.000us       0.000us             1  
+                                       cudaLaunchKernel         6.52%     219.993us         6.52%     219.993us       7.333us       0.000us         0.00%       0.000us       0.000us            30  
+                                        cudaMemcpyAsync         1.67%      56.492us         1.67%      56.492us       5.649us       0.000us         0.00%       0.000us       0.000us            10  
+                                  cudaStreamSynchronize        28.77%     970.752us        28.77%     970.752us      97.075us       0.000us         0.00%       0.000us       0.000us            10  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+Self CPU time total: 3.375ms
+Self CUDA time total: 1.392ms
+

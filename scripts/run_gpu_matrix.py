@@ -16,7 +16,7 @@ ROOT = Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from small_q_attention import paged_mtp_attention_reference  # noqa: E402
-from small_q_attention.cuda import forward_v0, forward_v1  # noqa: E402
+from small_q_attention.cuda import forward_v0, forward_v1, forward_v2  # noqa: E402
 
 
 def _percentile(values, fraction):
@@ -61,7 +61,10 @@ def main():
     import torch
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--variants", nargs="+", choices=("v0", "v1"), default=["v0", "v1"])
+    parser.add_argument("--variants", nargs="+", choices=("v0", "v1", "v2"), default=["v0", "v1"])
+    parser.add_argument(
+        "--chunk-keys", type=int, default=512, help="v2 only: KV entries owned by one block"
+    )
     parser.add_argument("--q-lens", nargs="+", type=int, default=[2, 4, 8])
     parser.add_argument("--kv-lens", nargs="+", type=int, default=[1024, 8192])
     parser.add_argument("--batch-sizes", nargs="+", type=int, default=[1, 4])
@@ -85,7 +88,14 @@ def main():
     results = []
     correctness_done = 0
     for variant in args.variants:
-        forward = forward_v0 if variant == "v0" else forward_v1
+        if variant == "v0":
+            forward = forward_v0
+        elif variant == "v1":
+            forward = forward_v1
+        else:
+
+            def forward(*call_args, _chunk=args.chunk_keys, **kwargs):
+                return forward_v2(*call_args, chunk_keys=_chunk, **kwargs)
         for index, case in enumerate(cases):
             if args.limit and index >= args.limit:
                 break

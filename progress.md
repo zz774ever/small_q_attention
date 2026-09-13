@@ -223,3 +223,40 @@
 | 2026-09-13 | `cutlass/arch/reg_reconfig.h` / `cute/tensor.hpp` missing | 1 | Initialise the `cutlass`, `cccl`, and `spdlog` submodules |
 | 2026-09-13 | `AssertionError: Mask is required for speculative decoding` | 1 | Pass the packed spec-dec draft mask |
 | 2026-09-13 | Intermittent SSH connection timeouts while the server was busy | 3 | Retried with a longer `ConnectTimeout` |
+
+## Session: 2026-09-13 (V2 kernel: split-KV + warp tiling)
+
+### Phase 4: mapping change instead of arithmetic tuning
+- **Status:** V2 implemented, correct, and measured; M1 identified as the next experiment
+- Hypothesis: V1's 20-203x gap to XQA is caused by the mapping, not the arithmetic. Disabling the per-key `__syncthreads()` and giving the KV range its own parallel dimension should recover most of it.
+- Implementation:
+  - `small_q_attention_v2_partial_kernel`: grid `(rows, num_chunks)`; four warps stride over the block's KV chunk with independent online-softmax state; no barrier inside the KV loop; one barrier per chunk to merge the warps.
+  - `small_q_attention_v2_merge_kernel`: combines chunk partials with a log-sum-exp merge; partials are fp32, output stays fp16.
+  - Added `forward_v2` to `src/small_q_attention/cuda.py` (with a `chunk_keys` knob), plus `scripts/build_and_test_v2.py`, `scripts/sweep_v2_chunk.py`, `scripts/profile_v1_v2.py`, and `v2` support in `scripts/run_gpu_matrix.py` and `scripts/compare_backends.py`.
+- Results:
+  - Correctness: `q_len` 2/4/8 x KV 33/1024/8192, reversed page table, chunk 128/512/single all pass with max abs error <= `4.88e-4`; V2 vs V1 differ by <= `2.44e-4`.
+  - Paired 12-case benchmark at `chunk_keys=512`: V2 is 5.9x-51x faster than V1 and 1.38x-16.42x behind XQA, versus V1's 19-203x gap. Best cell: `q_len=2, KV=1024, batch=1` at 99.8 us vs XQA 72.1 us.
+  - Chunk sweep at KV=8192: small chunks win when the row count is low (177.2 us at chunk 128 for `q_len=2/batch=1`), large chunks win when rows are many (1942.9 us at chunk 1024 for `q_len=8/batch=4`); 256-1024 is flat.
+  - `ncu` is unusable on this host (`ERR_NVGPUCTRPERM`), so `torch.profiler` was used: V1 is a single 11.893 ms kernel, V2 is 128.16 us partial plus 8.08 us merge for the same shape.
+  - Traffic model for `q_len=2, KV=8192, batch=1`: 268 MB read per call at ~2.1 TB/s (about half of H20's 4.0 TB/s), while reading each kv head once would be 33.5 MB. The remaining gap is GQA redundancy, not parallelism.
+- Files created/modified:
+  - `csrc/small_q_attention_ext.cu`, `src/small_q_attention/cuda.py`
+  - `scripts/build_and_test_v2.py`, `scripts/sweep_v2_chunk.py`, `scripts/profile_v1_v2.py`, `scripts/run_gpu_matrix.py`, `scripts/compare_backends.py`
+  - `results/h20_v0_v1_v2.jsonl`, `results/h20_v2_chunk_sweep.jsonl`
+  - `reports/h20/torch_profile_v1.txt`, `reports/h20/torch_profile_v2.txt`
+  - `docs/h20_v2_report.md`, `docs/stage_comparison.md`, `task_plan.md`, `progress.md`
+
+## Test Results (V2 session)
+| Test | Input | Expected | Actual | Status |
+|------|-------|----------|--------|--------|
+| V2 correctness | `q_len` 2/4/8 x KV 33/1024/8192, chunk 128/512/single | match CPU reference | max abs error <= 4.88e-4 | PASS |
+| V2 merge path | 8, 16, 64 chunks per row | match single-chunk result | agreement <= 3.05e-5 | PASS |
+| Paired benchmark | 12 cases x v0/v1/v2 | no failures | 36 ok rows | PASS |
+| Chunk sweep | 4 shapes x 5 chunk sizes | monotone trade-off | 256-1024 flat, extremes worse | PASS |
+| Kernel decomposition | `q_len=2, KV=8192, batch=1` | identify bottleneck | V1 one 11.893 ms kernel; V2 128.16 us + 8.08 us | PASS |
+
+## Error Log (V2 session)
+| Timestamp | Error | Attempt | Resolution |
+|-----------|-------|---------|------------|
+| 2026-09-13 | `ncu` returns `ERR_NVGPUCTRPERM` | 1 | Driver-level counter restriction; used `torch.profiler` kernel-time decomposition instead |
+| 2026-09-13 | Extension rebuild takes three compilations because v0/v1/v2 share one `.cu` | 1 | Accepted; keep one translation unit for reviewability |

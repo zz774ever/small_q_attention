@@ -7,6 +7,7 @@ from pathlib import Path
 
 _MODULE = None
 _MODULE_V1 = None
+_MODULE_V2 = None
 
 
 def load_v0(verbose: bool = False):
@@ -90,3 +91,60 @@ def forward_v1(query, key_cache, value_cache, block_tables, seq_lens, page_size:
     if query.shape[1] not in (2, 4, 8) or query.shape[-1] != 128:
         raise ValueError("v1 supports q_len 2, 4, or 8 and head_dim 128")
     return load_v1(verbose=verbose).forward_v1(query, key_cache, value_cache, block_tables, seq_lens, page_size)
+
+
+def load_v2(verbose: bool = False):
+    """Compile/load the split-KV, warp-tiled v2 extension."""
+    global _MODULE_V2
+    if _MODULE_V2 is None:
+        import torch
+        from torch.utils.cpp_extension import load
+
+        venv_bin = Path(sys.executable).resolve().parent
+        os.environ["PATH"] = os.pathsep.join(
+            part for part in (str(venv_bin), os.environ.get("PATH", "")) if part
+        )
+        source = Path(__file__).parents[2] / "csrc" / "small_q_attention_ext.cu"
+        _MODULE_V2 = load(
+            name="small_q_attention_v2",
+            sources=[str(source)],
+            extra_cuda_cflags=["-O3", "--use_fast_math"],
+            verbose=verbose,
+        )
+    return _MODULE_V2
+
+
+def forward_v2(
+    query,
+    key_cache,
+    value_cache,
+    block_tables,
+    seq_lens,
+    page_size: int,
+    chunk_keys: int = 512,
+    verbose: bool = False,
+):
+    """Run the v2 split-KV kernel under the same v0 contract.
+
+    ``chunk_keys`` is the number of KV entries one block owns; the grid gains a
+    second dimension of ``ceil(max_seq_len / chunk_keys)`` so the kernel stops
+    depending on ``batch * q_len * heads`` alone for parallelism.
+    """
+    import torch
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required for the v2 kernel")
+    tensors = (query, key_cache, value_cache, block_tables, seq_lens)
+    if any(not tensor.is_cuda for tensor in tensors):
+        raise ValueError("all v2 inputs must be CUDA tensors")
+    if any(not tensor.is_contiguous() for tensor in tensors):
+        raise ValueError("all v2 inputs must be contiguous")
+    if query.dtype != torch.float16 or key_cache.dtype != torch.float16 or value_cache.dtype != torch.float16:
+        raise ValueError("v2 requires FP16 Q/K/V")
+    if query.shape[1] not in (2, 4, 8) or query.shape[-1] != 128:
+        raise ValueError("v2 supports q_len 2, 4, or 8 and head_dim 128")
+    if chunk_keys <= 0:
+        raise ValueError("chunk_keys must be positive")
+    return load_v2(verbose=verbose).forward_v2(
+        query, key_cache, value_cache, block_tables, seq_lens, page_size, chunk_keys
+    )

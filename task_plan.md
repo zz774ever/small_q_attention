@@ -4,7 +4,7 @@
 Build and profile an independent specialized small-q paged-attention kernel for speculative decoding, then validate and optionally integrate the strongest result into FlashInfer.
 
 ## Current Phase
-Phase 2 (H20 FlashInfer baseline map) complete, Phase 4 in progress. The prefill to XQA gain from PR #3859 is now measured on H20; the standalone V0/V1 prototype is 20-200x behind XQA, so the next kernel step is a new design (V2: mapping and KV-tile reuse) rather than more V1 tuning. See `docs/h20_baseline_report.md`.
+Phase 4: V2 (split-KV grid plus warp-tiled blocks, no per-key barrier, LSE merge kernel) is validated and measured on H20. It cuts the XQA gap from 19-203x to 1.4-16x with correctness unchanged, and the remaining gap is attributed to roughly 8x redundant KV traffic from GQA. The next experiment is M1: share KV tiles across the query heads that map to one kv head. See `docs/h20_baseline_report.md` and `docs/h20_v2_report.md`.
 
 ## Phases
 
@@ -42,11 +42,11 @@ Phase 2 (H20 FlashInfer baseline map) complete, Phase 4 in progress. The prefill
 ### Phase 4: Kernel optimization and profiling
 - [x] Use RTX 3050 for compile/correctness iteration and initial controlled microbenchmarks.
 - [x] Compare the first mapping variant (cooperative score computation) with the V0 baseline.
-- [ ] Use server Hopper profiling for the target workload.
-- [ ] Compare additional mapping variants and tile sizes with controlled microbenchmarks.
-- [ ] Profile promising variants with Nsight Compute/System: kernel latency, memory transactions, tensor-core/FP unit utilization, warp stall, occupancy, and L2 behavior.
+- [x] Use server Hopper profiling for the target workload. Blocked for hardware counters: `ncu` returns `ERR_NVGPUCTRPERM` on this H20 (a driver-level restriction). Kernel-time decomposition via `torch.profiler` is used instead.
+- [x] Compare additional mapping variants and tile sizes with controlled microbenchmarks. Done for V2 (split-KV + warp tiling) and for `chunk_keys` 128-2048.
+- [ ] Profile promising variants with Nsight Compute/System: kernel latency, memory transactions, tensor-core/FP unit utilization, warp stall, occupancy, and L2 behavior. Partially done: kernel latency and a traffic model are available, counters are not.
 - [ ] Stop expanding the feature matrix until one variant beats the relevant baseline on a reproducible subset.
-- **Status:** in_progress and re-scoped. V1 beats V0 by 5-11x locally, but the H20 baseline shows V1 is 20-200x slower than FlashInfer XQA, so V1 is not a competitive design. The next variant must change the mapping (M1/M2) and stage KV tiles (T2) instead of tuning V1.
+- **Status:** in_progress. V2 keeps the contract, passes the correctness matrix, and lands 1.4-16x behind XQA (V1 was 19-203x). V2 is bandwidth-bound at roughly 2.1 TB/s while reading the KV about 8x redundantly, so M1 (KV-tile sharing across query heads of one kv head) is the next bounded experiment rather than further V2 tuning.
 
 ### Local-only completion checklist
 - [x] Add memory-aware GPU matrix runner with JSONL output.

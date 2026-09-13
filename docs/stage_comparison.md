@@ -9,7 +9,8 @@ on the target server before making an upstream or end-to-end claim.
 | V0 | One block per `(batch, q_row, q_head)`; every output lane recomputes Q.K | q_len 2/4/8, FP16 error <= `4.88e-4`; non-contiguous pages | KV=1024, batch=1: 10.268/20.370/39.598 ms | Keep as readable baseline |
 | V1 | Warp 0 computes each Q.K once with shuffle reduction; lanes reuse score | q_len 2/4/8, reversed page table; error <= `4.88e-4` | KV=1024, batch=1: 2.054/2.131/4.436 ms | Keep; profile and broaden matrix |
 | V1-long | Same V1 mapping at KV=8192 | Same contract; correctness path unchanged | KV=8192, batch=1: 16.828/14.444/29.516 ms | Strong local signal; repeat p99 and batch scaling |
-| V2 (planned) | Shared-memory KV tile or query-group reuse | Must pass the same harness | Not measured | Only start after profiling confirms global-load/reuse opportunity |
+| V2 | Split-KV grid plus warp-tiled blocks: no per-key barrier, log-sum-exp merge kernel | `q_len` 2/4/8, KV 33/1024/8192, reversed page table, chunk 128/512/single: error <= `4.88e-4` | H20, KV=8192: 177 us (q2/b1) to 1943 us (q8/b4) | Keep. Cuts the XQA gap from 19-203x to 1.4-16x |
+| V3 (planned) | M1: share KV tiles across the query heads that map to one kv head (GQA reuse), then shared-memory staging | Must pass the same harness | Not measured | Next step: V2 already runs at ~2.1 TB/s while reading the KV 8x redundantly |
 
 ## Interpretation
 
@@ -36,6 +37,16 @@ so the gap that issue #3420 describes is real and is already addressed by the
 XQA routing in this revision. The standalone prototype is 20-200x behind XQA,
 and the gap grows with KV length, which rules out closing it by tuning the V1
 layout. V2 must change parallelism (mapping) and KV reuse, not just arithmetic.
+
+## After V2
+
+V2 changed the mapping only (split-KV + warp-tiled blocks, no per-key barrier)
+and moved the same shapes to 1.4x-16x behind XQA, a 5.9x-51x gain over V1, with
+correctness unchanged. The remaining gap is no longer parallelisation: at
+`q_len=2, KV=8192, batch=1` V2 reads about 268 MB per call in 128 us, roughly
+2.1 TB/s, while the same KV would be 33.5 MB if each kv head were read once
+instead of once per query row. That is GQA redundancy, so the next experiment is
+KV-tile sharing across query heads (M1), not more arithmetic tuning.
 
 ## Local matrix subset
 
