@@ -8,6 +8,7 @@ from pathlib import Path
 _MODULE = None
 _MODULE_V1 = None
 _MODULE_V2 = None
+_MODULE_V3 = None
 
 
 def load_v0(verbose: bool = False):
@@ -147,4 +148,65 @@ def forward_v2(
         raise ValueError("chunk_keys must be positive")
     return load_v2(verbose=verbose).forward_v2(
         query, key_cache, value_cache, block_tables, seq_lens, page_size, chunk_keys
+    )
+
+
+def load_v3(verbose: bool = False):
+    """Compile/load the GQA-shared v3 extension."""
+    global _MODULE_V3
+    if _MODULE_V3 is None:
+        import torch
+        from torch.utils.cpp_extension import load
+
+        venv_bin = Path(sys.executable).resolve().parent
+        os.environ["PATH"] = os.pathsep.join(
+            part for part in (str(venv_bin), os.environ.get("PATH", "")) if part
+        )
+        source = Path(__file__).parents[2] / "csrc" / "small_q_attention_ext.cu"
+        _MODULE_V3 = load(
+            name="small_q_attention_v3",
+            sources=[str(source)],
+            extra_cuda_cflags=["-O3", "--use_fast_math"],
+            verbose=verbose,
+        )
+    return _MODULE_V3
+
+
+def forward_v3(
+    query,
+    key_cache,
+    value_cache,
+    block_tables,
+    seq_lens,
+    page_size: int,
+    chunk_keys: int = 512,
+    max_seq_len: int = 0,
+    verbose: bool = False,
+):
+    """Run the v3 kernel: split-KV plus GQA-shared K/V loads.
+
+    One block covers every query head that shares a kv head, so each K/V element
+    is loaded once instead of once per query head. `max_seq_len` is the longest
+    sequence length in the batch; passing it skips a device reduction and a
+    device-to-host copy per call, and 0 falls back to measuring it.
+    """
+    import torch
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required for the v3 kernel")
+    tensors = (query, key_cache, value_cache, block_tables, seq_lens)
+    if any(not tensor.is_cuda for tensor in tensors):
+        raise ValueError("all v3 inputs must be CUDA tensors")
+    if any(not tensor.is_contiguous() for tensor in tensors):
+        raise ValueError("all v3 inputs must be contiguous")
+    if query.dtype != torch.float16 or key_cache.dtype != torch.float16 or value_cache.dtype != torch.float16:
+        raise ValueError("v3 requires FP16 Q/K/V")
+    if query.shape[1] not in (2, 4, 8) or query.shape[-1] != 128:
+        raise ValueError("v3 supports q_len 2, 4, or 8 and head_dim 128")
+    if query.shape[2] % key_cache.shape[2] != 0 or query.shape[2] // key_cache.shape[2] != 4:
+        raise ValueError("v3 requires a GQA group size of exactly 4 (Hq/Hkv = 32/8)")
+    if chunk_keys <= 0:
+        raise ValueError("chunk_keys must be positive")
+    return load_v3(verbose=verbose).forward_v3(
+        query, key_cache, value_cache, block_tables, seq_lens, page_size, chunk_keys, max_seq_len
     )

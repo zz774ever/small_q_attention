@@ -260,3 +260,33 @@
 |-----------|-------|---------|------------|
 | 2026-09-13 | `ncu` returns `ERR_NVGPUCTRPERM` | 1 | Driver-level counter restriction; used `torch.profiler` kernel-time decomposition instead |
 | 2026-09-13 | Extension rebuild takes three compilations because v0/v1/v2 share one `.cu` | 1 | Accepted; keep one translation unit for reviewability |
+
+## Session: 2026-09-13 (V3 kernel: GQA K/V sharing reaches XQA parity)
+
+### Phase 4: M1 experiment, kernel line frozen
+- **Status:** complete; V3 is the delivered kernel
+- Hypothesis: V2 is bandwidth-bound because each query head reads the KV again; sharing each K/V slice across the four query heads of one kv head should cut traffic 4x.
+- Implementation:
+  - `small_q_attention_v3_partial_kernel`: one block per `(batch, query_row, kv_head)`, all four query heads in registers, one K and one V slice loaded per lane per key and reused by all four heads; same barrier-free KV loop and one barrier per chunk as V2.
+  - Partial layout is unchanged, so V3 reuses `small_q_attention_v2_merge_kernel`.
+  - `small_q_attention_v3` gained a `max_seq_len` argument so callers can avoid a per-call device reduce plus DtoH copy.
+  - Added `forward_v3`, `scripts/build_and_test_v3.py`, `v3` support in `scripts/run_gpu_matrix.py` and `scripts/compare_backends.py`, and a `--variant` flag on `scripts/sweep_v2_chunk.py`.
+- Results:
+  - Correctness: `q_len` 2/4/8 x KV 33/1024/8192, reversed page table, chunk 128/512, both explicit and auto `max_seq_len`: max abs error <= `4.88e-4`, identical to V1/V2.
+  - Paired 12-case benchmark at chunk 512: V3 is 1.24x-2.40x faster than V2 and 17x-30x faster than V1; the gap to XQA is 1.12x-6.83x.
+  - Chunk sweep at KV=8192: best 82.7 us at `q_len=2, batch=1, chunk=256`, which is 1.03x of XQA's 80.0 us, i.e. parity.
+  - Traffic model for `q_len=2, KV=8192, batch=1`: about 268 MB (V2) to about 66.5 MB (V3) per call; estimated achieved bandwidth falls from about 2.1 TB/s to about 0.6 TB/s, so V3 is no longer memory-bound.
+- Decision: freeze the kernel line at V3. The residual gap is concentrated in many-row, long-KV shapes and would require a tensor-core/TMA rewrite with uncertain payoff.
+- Files created/modified:
+  - `csrc/small_q_attention_ext.cu`, `src/small_q_attention/cuda.py`
+  - `scripts/build_and_test_v3.py`, `scripts/sweep_v2_chunk.py`, `scripts/run_gpu_matrix.py`, `scripts/compare_backends.py`
+  - `results/h20_v0_v1_v2_v3.jsonl`, `results/h20_v3_chunk_sweep.jsonl`, `reports/h20/backend_comparison_table.txt`
+  - `docs/h20_v3_report.md`, `docs/stage_comparison.md`, `task_plan.md`, `progress.md`
+
+## Test Results (V3 session)
+| Test | Input | Expected | Actual | Status |
+|------|-------|----------|--------|--------|
+| V3 correctness | `q_len` 2/4/8 x KV 33/1024/8192, chunk 128/512 | match CPU reference | max abs error <= 4.88e-4 | PASS |
+| V3 auto length path | same cases with `max_seq_len=0` | match explicit path | identical errors | PASS |
+| Paired benchmark | 12 cases x v0/v1/v2/v3 | no failures | 48 ok rows | PASS |
+| V3 chunk sweep | 4 shapes x 5 chunk sizes | best near chunk 256 | 82.7-836.9 us, optimum flat 256-512 | PASS |

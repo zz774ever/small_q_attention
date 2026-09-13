@@ -13,7 +13,7 @@ from collections import defaultdict
 from pathlib import Path
 
 
-COLUMNS = ("v0", "v1", "v2", "flashinfer_prefill", "flashinfer_xqa", "flashinfer_trtllm")
+COLUMNS = ("v0", "v1", "v2", "v3", "flashinfer_prefill", "flashinfer_xqa", "flashinfer_trtllm")
 
 
 def latency_p50(item):
@@ -52,18 +52,24 @@ def main():
     args = parser.parse_args()
 
     grouped = load(args.inputs)
-    header = ["q_len", "kv_len", "batch"] + list(COLUMNS) + ["xqa/prefill", "v1/xqa", "v2/xqa"]
+    header = ["q_len", "kv_len", "batch"] + list(COLUMNS) + [
+        "xqa/prefill",
+        "v1/xqa",
+        "v2/xqa",
+        "v3/xqa",
+    ]
     print(" ".join(f"{h:>9}" for h in header))
     for (q_len, kv_len, batch), variants in sorted(grouped.items()):
         values = [variants.get(name) for name in COLUMNS]
         row = [q_len, kv_len, batch] + [
             f"{v:.1f}" if v is not None else "-" for v in values
         ]
-        prefill, xqa = values[3], values[4]
+        prefill, xqa = values[4], values[5]
         row += [
             ratio(prefill, xqa),
             ratio(values[1], xqa),
             ratio(values[2], xqa),
+            ratio(values[3], xqa),
         ]
         print(" ".join(f"{str(cell):>9}" for cell in row))
 

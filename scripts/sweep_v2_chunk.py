@@ -1,4 +1,4 @@
-"""Sweep the V2 KV chunk size on representative shapes.
+"""Sweep the V2/V3 KV chunk size on representative shapes.
 
 V2's parallelism is `rows * ceil(max_seq_len / chunk_keys)`, so the chunk size
 trades launch parallelism against per-block work and the cost of the merge
@@ -17,7 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from small_q_attention.cuda import forward_v2  # noqa: E402
+from small_q_attention.cuda import forward_v2, forward_v3  # noqa: E402
 
 FIXED = {
     "dtype": "float16",
@@ -80,6 +80,7 @@ def main():
     parser.add_argument("--kv-lens", nargs="+", type=int, default=[8192])
     parser.add_argument("--batch-sizes", nargs="+", type=int, default=[1, 4])
     parser.add_argument("--chunks", nargs="+", type=int, default=[128, 256, 512, 1024, 2048])
+    parser.add_argument("--variant", choices=("v2", "v3"), default="v2")
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--repeats", type=int, default=15)
     parser.add_argument("--output", type=Path)
@@ -96,14 +97,21 @@ def main():
         rows_for_case = []
         for chunk_keys in args.chunks:
             num_chunks = max(1, (kv_len + chunk_keys - 1) // chunk_keys)
+            if args.variant == "v2":
+                call = lambda ck=chunk_keys: forward_v2(*tensors, case["page_size"], ck)  # noqa: E731
+            else:
+                call = lambda ck=chunk_keys: forward_v3(  # noqa: E731
+                    *tensors, case["page_size"], ck, kv_len
+                )
             timing = measure(
                 torch,
-                lambda ck=chunk_keys: forward_v2(*tensors, case["page_size"], ck),
+                call,
                 args.warmup,
                 args.repeats,
             )
             row = {
                 "case": case,
+                "variant": args.variant,
                 "chunk_keys": chunk_keys,
                 "num_chunks": num_chunks,
                 "device": torch.cuda.get_device_name(0),

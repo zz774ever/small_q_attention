@@ -4,7 +4,7 @@
 Build and profile an independent specialized small-q paged-attention kernel for speculative decoding, then validate and optionally integrate the strongest result into FlashInfer.
 
 ## Current Phase
-Phase 4: V2 (split-KV grid plus warp-tiled blocks, no per-key barrier, LSE merge kernel) is validated and measured on H20. It cuts the XQA gap from 19-203x to 1.4-16x with correctness unchanged, and the remaining gap is attributed to roughly 8x redundant KV traffic from GQA. The next experiment is M1: share KV tiles across the query heads that map to one kv head. See `docs/h20_baseline_report.md` and `docs/h20_v2_report.md`.
+Phase 4 is complete for the independent-kernel line. V3 (M1: one block per `(batch, query_row, kv_head)` sharing each K/V slice across the four query heads of that kv head) reaches parity with FlashInfer XQA at `q_len=2, KV=8192, batch=1` (82.7 us vs 80.0 us) and lands 1.12-6.83x behind XQA across the 12-case subset, versus 19-203x for V1. The kernel is frozen here; the remaining work is the Phase 5/6 delivery decision. See `docs/h20_baseline_report.md`, `docs/h20_v2_report.md`, and `docs/h20_v3_report.md`.
 
 ## Phases
 
@@ -46,7 +46,7 @@ Phase 4: V2 (split-KV grid plus warp-tiled blocks, no per-key barrier, LSE merge
 - [x] Compare additional mapping variants and tile sizes with controlled microbenchmarks. Done for V2 (split-KV + warp tiling) and for `chunk_keys` 128-2048.
 - [ ] Profile promising variants with Nsight Compute/System: kernel latency, memory transactions, tensor-core/FP unit utilization, warp stall, occupancy, and L2 behavior. Partially done: kernel latency and a traffic model are available, counters are not.
 - [ ] Stop expanding the feature matrix until one variant beats the relevant baseline on a reproducible subset.
-- **Status:** in_progress. V2 keeps the contract, passes the correctness matrix, and lands 1.4-16x behind XQA (V1 was 19-203x). V2 is bandwidth-bound at roughly 2.1 TB/s while reading the KV about 8x redundantly, so M1 (KV-tile sharing across query heads of one kv head) is the next bounded experiment rather than further V2 tuning.
+- **Status:** complete for V2 and V3. V2 (split-KV + warp tiling) landed 1.4-16x behind XQA; V3 (GQA K/V sharing) lands 1.12-6.83x behind with parity in the `q_len=2, KV=8192` case, and is no longer bandwidth-bound. Further gains would need tensor-core/TMA restructuring for the many-row long-KV shapes; that is out of scope unless the project decides it needs to beat XQA.
 
 ### Local-only completion checklist
 - [x] Add memory-aware GPU matrix runner with JSONL output.
