@@ -10,6 +10,7 @@ _MODULE_V1 = None
 _MODULE_V2 = None
 _MODULE_V3 = None
 _MODULE_V4 = None
+_MODULE_V5 = None
 
 
 def load_v0(verbose: bool = False):
@@ -269,4 +270,67 @@ def forward_v4(
         raise ValueError("chunk_keys must be positive")
     return load_v4(verbose=verbose).forward_v4(
         query, key_cache, value_cache, block_tables, seq_lens, page_size, chunk_keys, max_seq_len
+    )
+
+
+def load_v5(verbose: bool = False):
+    """Compile/load the token-group sharing V5 extension."""
+    global _MODULE_V5
+    if _MODULE_V5 is None:
+        import torch
+        from torch.utils.cpp_extension import load
+
+        venv_bin = Path(sys.executable).resolve().parent
+        os.environ["PATH"] = os.pathsep.join(
+            part for part in (str(venv_bin), os.environ.get("PATH", "")) if part
+        )
+        source = Path(__file__).parents[2] / "csrc" / "small_q_attention_ext.cu"
+        _MODULE_V5 = load(
+            name="small_q_attention_v5",
+            sources=[str(source)],
+            extra_cuda_cflags=["-O3", "--use_fast_math"],
+            verbose=verbose,
+        )
+    return _MODULE_V5
+
+
+def forward_v5(
+    query,
+    key_cache,
+    value_cache,
+    block_tables,
+    seq_lens,
+    page_size: int,
+    chunk_keys: int = 512,
+    token_group: int = 2,
+    max_seq_len: int = 0,
+    verbose: bool = False,
+):
+    """Run V5, which shares K/V loads across a small group of query rows.
+
+    V5 is an experiment, not a general dispatch path. It keeps the V3 FP16,
+    head_dim=128, GQA=32/8 contract and accepts token_group 2 or 4.
+    """
+    import torch
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required for the v5 kernel")
+    tensors = (query, key_cache, value_cache, block_tables, seq_lens)
+    if any(not tensor.is_cuda for tensor in tensors):
+        raise ValueError("all v5 inputs must be CUDA tensors")
+    if any(not tensor.is_contiguous() for tensor in tensors):
+        raise ValueError("all v5 inputs must be contiguous")
+    if query.dtype != torch.float16 or key_cache.dtype != torch.float16 or value_cache.dtype != torch.float16:
+        raise ValueError("v5 requires FP16 Q/K/V")
+    if query.shape[1] not in (2, 4, 8) or query.shape[-1] != 128:
+        raise ValueError("v5 supports q_len 2, 4, or 8 and head_dim 128")
+    if query.shape[2] % key_cache.shape[2] != 0 or query.shape[2] // key_cache.shape[2] != 4:
+        raise ValueError("v5 requires a GQA group size of exactly 4 (Hq/Hkv = 32/8)")
+    if token_group not in (2, 4):
+        raise ValueError("v5 token_group must be 2 or 4")
+    if chunk_keys <= 0:
+        raise ValueError("chunk_keys must be positive")
+    return load_v5(verbose=verbose).forward_v5(
+        query, key_cache, value_cache, block_tables, seq_lens,
+        page_size, chunk_keys, token_group, max_seq_len
     )
